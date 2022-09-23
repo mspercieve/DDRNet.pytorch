@@ -1,5 +1,6 @@
 from ctypes import util
 import math
+from turtle import mode
 import torch
 import numpy as np 
 import torch.nn as nn
@@ -201,6 +202,22 @@ class segmenthead(nn.Module):
 
         return out
 
+class Bag(nn.Module):
+    def __init__(self, in_channels, out_channels, BatchNorm=nn.BatchNorm2d):
+        super(Bag, self).__init__()
+
+        self.conv = nn.Sequential(
+                                BatchNorm(in_channels),
+                                nn.ReLU(inplace=True),
+                                nn.Conv2d(in_channels, out_channels, 
+                                          kernel_size=3, padding=1, bias=False)                  
+                                )
+
+        
+    def forward(self, p, i, d):
+        edge_att = torch.sigmoid(d)
+        return self.conv(edge_att*p + (1-edge_att)*i)
+
 class DualResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=19, planes=64, spp_planes=128, head_planes=128, augment=True):
@@ -256,12 +273,25 @@ class DualResNet(nn.Module):
         self.layer5 =  self._make_layer(Bottleneck, planes * 8, planes * 8, 1, stride=2)
 
         self.spp = DAPPM(planes * 16, spp_planes, planes * 4)
+#boundary branch
+        self.layer3_b = self._make_single_layer(BasicBlock, planes * 2, planes)
+        self.layer4_b = self._make_layer(Bottleneck, planes, planes, 1)
+        self.layer5_b = self._make_layer(Bottleneck, planes * 2, planes * 2, 1)
+        self.dfm = Bag(planes * 4, planes * 4)
 
-        self.layer4_b = nn.Conv2d(highres_planes, highres_planes, kernel_size=3, stride=1, padding=1)
+        self.diff3 = nn.Sequential(
+                                        nn.Conv2d(planes * 4, planes, kernel_size=3, padding=1, bias=False),
+                                        BatchNorm2d(planes, momentum=bn_mom),
+                                        )
+        self.diff4 = nn.Sequential(
+                                     nn.Conv2d(planes * 8, planes * 2, kernel_size=3, padding=1, bias=False),
+                                     BatchNorm2d(planes * 2, momentum=bn_mom),
+                                     )
+
 
         if self.augment:
             self.seghead_detail = segmenthead(highres_planes, head_planes, num_classes)            
-            self.seghead_boundary = segmenthead(highres_planes, planes, 1, scale_factor=8)
+            self.seghead_boundary = segmenthead(planes, planes, 1, scale_factor=8)
         self.final_layer = segmenthead(planes * 4, head_planes, num_classes)
 
 
@@ -293,6 +323,19 @@ class DualResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
+    def _make_single_layer(self, block, inplanes, planes, stride=1):
+        downsample = None
+        if stride != 1 or inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion, momentum=bn_mom),
+            )
+
+        layer = block(inplanes, planes, stride, downsample, no_relu=True)
+        
+        return layer
+
  
     def forward(self, x):
 
@@ -311,34 +354,52 @@ class DualResNet(nn.Module):
         x = self.layer3(self.relu(x)) #shape = 1, 512, 16, 16 (context3)
         layers.append(x)
         x_ = self.layer3_(self.relu(layers[1])) # shape = 1, 256, 32, 32 (detail3)
+        x_b = self.layer3_b(self.relu(layers[1])) # shape = 1, 256, 32, 32 (boundary3)
+
 
         x = x + self.down3(self.relu(x_))  #shape = 1, 512, 16, 16 (context3= detail3' + context3)
         x_ = x_ + F.interpolate(
                         self.compression3(self.relu(layers[2])),
                         size=[height_output, width_output],
                         mode='bilinear') # shape = 1, 256, 32, 32 (detail3 = context3' + detail3)
+
+        x_b = x_b + F.interpolate(
+                        self.diff3(x),
+                        size = [height_output, width_output],
+                        mode='bilinear') # shape = 1, 256, 32, 32 (boundary3 = boundary3 + boundary3')
+
+
         if self.augment:
             temp_detail = x_
+            temp_boundary = x_b # shape = 1, 256, 32, 32 
 
         x = self.layer4(self.relu(x)) #shape = 1, 1024, 8, 8 (context4)
         layers.append(x)
         x_ = self.layer4_(self.relu(x_)) #shape = 1, 256, 32, 32 (detail4)
+        x_b = self.layer4_b(self.relu(x_b)) #shape = 1, 256, 32, 32 (boundary4)
+
 
         x = x + self.down4(self.relu(x_)) # shape = 1, 1024, 8, 8 (context4 = context4 + detail4')
         x_ = x_ + F.interpolate(
                         self.compression4(self.relu(layers[3])),
                         size=[height_output, width_output],
                         mode='bilinear') # shape = 1, 256, 32, 32 (detail4 = detail4 + context4')
+        x_b = x_b + F.interpolate(
+                        self.diff4(x),
+                        size = [height_output, width_output],
+                        mode='bilinear') # shape = 1, 256, 32, 32 (boundary4 = boundary4 + boundary4')
+        
         #boundary layers
         
-        temp_boundary = self.layer4_b(self.relu(x_)) #shape = 1, 256, 32, 32 (boundary4)
+        
         x_ = self.layer5_(self.relu(x_)) #shape = 1, 256, 32, 32 (detail5)
+        x_b = self.layer5_b(self.relu(x_b)) #shape =
         x = F.interpolate(
                         self.spp(self.layer5(self.relu(x))),
                         size=[height_output, width_output],
                         mode='bilinear') # shape = 1, 256, 32, 32 ( DAPPM + interpolation)
 
-        x_ = self.final_layer(x + x_) #shape = 1, 256, 32, 32
+        x_ = self.final_layer(self.dfm(x_, x, x_b)) #shape = 1, 256, 32, 32
 
         if self.augment: 
             x_detail_head = self.seghead_detail(temp_detail)
