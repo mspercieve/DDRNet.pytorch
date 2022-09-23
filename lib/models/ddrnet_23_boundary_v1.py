@@ -351,55 +351,55 @@ class DualResNet(nn.Module):
         x = self.layer2(self.relu(x))
         layers.append(x)
   
-        x = self.layer3(self.relu(x)) #shape = 1, 512, 16, 16 (context3)
+        x = self.layer3(self.relu(x)) #shape = [batch, planes * 4, 1/16 , 1/16]  (context3)
         layers.append(x)
-        x_ = self.layer3_(self.relu(layers[1])) # shape = 1, 256, 32, 32 (detail3)
-        x_b = self.layer3_b(self.relu(layers[1])) # shape = 1, 256, 32, 32 (boundary3)
+        x_ = self.layer3_(self.relu(layers[1])) # shape = [batch, planes * 2, 1/8, 1/8] (detail3)
+        x_b = self.layer3_b(self.relu(layers[1])) # shape = [batch, planes, 1/8, 1/8] (boundary3)
 
 
-        x = x + self.down3(self.relu(x_))  #shape = 1, 512, 16, 16 (context3= detail3' + context3)
+        x = x + self.down3(self.relu(x_))  #shape = [batch, planes * 4, 1/16, 1/16] (context3= context3 + detail3')
         x_ = x_ + F.interpolate(
                         self.compression3(self.relu(layers[2])),
                         size=[height_output, width_output],
-                        mode='bilinear') # shape = 1, 256, 32, 32 (detail3 = context3' + detail3)
+                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail3 = detail3 + context3')
 
         x_b = x_b + F.interpolate(
                         self.diff3(x),
                         size = [height_output, width_output],
-                        mode='bilinear') # shape = 1, 256, 32, 32 (boundary3 = boundary3 + boundary3')
+                        mode='bilinear') # shape = [batch, planes, 1/8, 1/8] (boundary3 = boundary3 + context3')
 
 
         if self.augment:
-            temp_detail = x_
-            temp_boundary = x_b # shape = 1, 256, 32, 32 
+            temp_detail = x_# detail head
+            temp_boundary = x_b # boundary head
 
-        x = self.layer4(self.relu(x)) #shape = 1, 1024, 8, 8 (context4)
+        x = self.layer4(self.relu(x)) #shape = [batch, planes * 8, 1/32, 1/32] (context4)
         layers.append(x)
-        x_ = self.layer4_(self.relu(x_)) #shape = 1, 256, 32, 32 (detail4)
-        x_b = self.layer4_b(self.relu(x_b)) #shape = 1, 256, 32, 32 (boundary4)
+        x_ = self.layer4_(self.relu(x_)) #shape = [batch, planes * 2, 1/8, 1/8] (detail4)
+        x_b = self.layer4_b(self.relu(x_b)) #shape = [batch, planes * 2, 1/8, 1/8] (boundary4)
 
 
-        x = x + self.down4(self.relu(x_)) # shape = 1, 1024, 8, 8 (context4 = context4 + detail4')
+        x = x + self.down4(self.relu(x_)) # shape = [batch, planes * 8, 1/32, 1/32] (context4 = context4 + detail4')
         x_ = x_ + F.interpolate(
                         self.compression4(self.relu(layers[3])),
                         size=[height_output, width_output],
-                        mode='bilinear') # shape = 1, 256, 32, 32 (detail4 = detail4 + context4')
+                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail4 = detail4 + context4')
         x_b = x_b + F.interpolate(
                         self.diff4(x),
                         size = [height_output, width_output],
-                        mode='bilinear') # shape = 1, 256, 32, 32 (boundary4 = boundary4 + boundary4')
+                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (boundary4 = boundary4 + context4')
         
         #boundary layers
         
         
-        x_ = self.layer5_(self.relu(x_)) #shape = 1, 256, 32, 32 (detail5)
-        x_b = self.layer5_b(self.relu(x_b)) #shape =
+        x_ = self.layer5_(self.relu(x_)) #shape = [batch, planes * 4, 1/8, 1/8] (detail5)
+        x_b = self.layer5_b(self.relu(x_b)) #shape = [batch, planes * 4, 1/8, 1/8] (boundary5)
         x = F.interpolate(
                         self.spp(self.layer5(self.relu(x))),
                         size=[height_output, width_output],
-                        mode='bilinear') # shape = 1, 256, 32, 32 ( DAPPM + interpolation)
+                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] ( DAPPM + interpolation)
 
-        x_ = self.final_layer(self.dfm(x_, x, x_b)) #shape = 1, 256, 32, 32
+        x_ = self.final_layer(self.dfm(x_, x, x_b)) #shape = [batch, num_classes, 1/8, 1/8] (output)
 
         if self.augment: 
             x_detail_head = self.seghead_detail(temp_detail)
