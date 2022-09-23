@@ -29,7 +29,8 @@ class Cityscapes(BaseDataset):
                  downsample_rate=1,
                  scale_factor=16,
                  mean=[0.485, 0.456, 0.406], 
-                 std=[0.229, 0.224, 0.225]):
+                 std=[0.229, 0.224, 0.225],
+                 bd_dilate_size=4):
 
         super(Cityscapes, self).__init__(ignore_label, base_size,
                 crop_size, downsample_rate, scale_factor, mean, std,)
@@ -65,6 +66,7 @@ class Cityscapes(BaseDataset):
                                         1.1116, 0.9037, 1.0865, 1.0955, 
                                         1.0865, 1.1529, 1.0507]).cuda()
     
+        self.bd_dilate_size = bd_dilate_size
     def read_files(self):
         files = []
         if 'test' in self.list_path:
@@ -114,10 +116,10 @@ class Cityscapes(BaseDataset):
                            cv2.IMREAD_GRAYSCALE)
         label = self.convert_label(label)
 
-        image, label = self.gen_sample(image, label, 
-                                self.multi_scale, self.flip)
+        image, label, edge = self.gen_sample(image, label, 
+                                self.multi_scale, self.flip, edge_size=self.bd_dilate_size)
 
-        return image.copy(), label.copy(), np.array(size), name
+        return image.copy(), label.copy(), edge.copy(), np.array(size), name
 
     def multi_scale_inference(self, config, model, image, scales=[1], flip=False):
         batch, _, ori_height, ori_width = image.size()

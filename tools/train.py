@@ -28,10 +28,12 @@ import models
 import datasets
 from config import config
 from config import update_config
-from core.criterion import CrossEntropy, OhemCrossEntropy
+from core.criterion import CrossEntropy, OhemCrossEntropy, BoundaryLoss
 from core.function import train, validate
 from utils.modelsummary import get_model_summary
 from utils.utils import create_logger, FullModel
+
+[sys.path.append(i) for i in ['.','..']]
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train segmentation network')
@@ -51,7 +53,6 @@ def parse_args():
     update_config(config, args)
 
     return args
-
 def get_sampler(dataset):
     from utils.distributed import is_distributed
     if is_distributed():
@@ -194,15 +195,16 @@ def main():
 
     # criterion
     if config.LOSS.USE_OHEM:
-        criterion = OhemCrossEntropy(ignore_label=config.TRAIN.IGNORE_LABEL,
+        sem_criterion = OhemCrossEntropy(ignore_label=config.TRAIN.IGNORE_LABEL,
                                         thres=config.LOSS.OHEMTHRES,
                                         min_kept=config.LOSS.OHEMKEEP,
                                         weight=train_dataset.class_weights)
     else:
-        criterion = CrossEntropy(ignore_label=config.TRAIN.IGNORE_LABEL,
+        sem_criterion = CrossEntropy(ignore_label=config.TRAIN.IGNORE_LABEL,
                                     weight=train_dataset.class_weights)
 
-    model = FullModel(model, criterion)
+    bd_criterion = BoundaryLoss()
+    model = FullModel(model, sem_criterion, bd_criterion)
     if distributed:
         model = model.to(device)
         model = torch.nn.parallel.DistributedDataParallel(

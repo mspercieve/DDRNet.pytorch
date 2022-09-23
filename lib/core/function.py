@@ -24,6 +24,7 @@ from utils.utils import Map16, Vedio
 # from utils.DenseCRF import DenseCRF
 
 import utils.distributed as dist
+import wandb
 
 vedioCap = Vedio('./output/cdOffice.mp4')
 map16 = Map16(vedioCap)
@@ -46,21 +47,26 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
           num_iters, trainloader, optimizer, model, writer_dict):
     # Training
     model.train()
+    wandb.init()
 
     batch_time = AverageMeter()
     ave_loss = AverageMeter()
     ave_acc  = AverageMeter()
+    avg_sem_loss = AverageMeter()
+    avg_bce_loss = AverageMeter()
     tic = time.time()
     cur_iters = epoch*epoch_iters
     writer = writer_dict['writer']
     global_steps = writer_dict['train_global_steps']
 
     for i_iter, batch in enumerate(trainloader, 0):
-        images, labels, _, _ = batch
+        images, labels, bd_gts, _, _ = batch
+        
         images = images.cuda()
         labels = labels.long().cuda()
-
-        losses, _, acc = model(images, labels)
+        bd_gts = bd_gts.float().cuda()
+        
+        losses, _, acc, loss_list = model(images, labels, bd_gts)
         loss = losses.mean()
         acc  = acc.mean()
 
@@ -80,6 +86,8 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
         # update average loss
         ave_loss.update(reduced_loss.item())
         ave_acc.update(acc.item())
+        avg_sem_loss.update(loss_list[0].mean().item())
+        avg_bce_loss.update(loss_list[1].mean().item())
 
         lr = adjust_learning_rate(optimizer,
                                   base_lr,
@@ -93,24 +101,28 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
                       batch_time.average(), [x['lr'] for x in optimizer.param_groups], ave_loss.average(),
                       ave_acc.average())
             logging.info(msg)
+            wandb.log({"Epoch": epoch, "Loss": ave_loss.average(), "Acc":ave_acc.average(), "BCE_loss": avg_bce_loss.average()})
 
     writer.add_scalar('train_loss', ave_loss.average(), global_steps)
     writer_dict['train_global_steps'] = global_steps + 1
 
 def validate(config, testloader, model, writer_dict):
     model.eval()
+    wandb.init()
+
     ave_loss = AverageMeter()
     nums = config.MODEL.NUM_OUTPUTS
     confusion_matrix = np.zeros(
         (config.DATASET.NUM_CLASSES, config.DATASET.NUM_CLASSES, nums))
     with torch.no_grad():
-        for idx, batch in enumerate(testloader):
-            image, label, _, _ = batch
+        for idx, batch in enumerate(tqdm((testloader))):
+            image, label, bd_gts, _, _ = batch
             size = label.size()
             image = image.cuda()
             label = label.long().cuda()
+            bd_gts = bd_gts.float().cuda()
 
-            losses, pred, _ = model(image, label)
+            losses, pred, _, _ = model(image, label, bd_gts)
             if not isinstance(pred, (list, tuple)):
                 pred = [pred]
             for i, x in enumerate(pred):
@@ -127,8 +139,8 @@ def validate(config, testloader, model, writer_dict):
                     config.TRAIN.IGNORE_LABEL
                 )
 
-            if idx % 10 == 0:
-                print(idx)
+            #if idx % 10 == 0:
+            #    print(idx)
 
             loss = losses.mean()
             if dist.is_distributed():
@@ -151,6 +163,7 @@ def validate(config, testloader, model, writer_dict):
         if dist.get_rank() <= 0:
             logging.info('{} {} {}'.format(i, IoU_array, mean_IoU))
 
+    wandb.log({"val_loss":ave_loss.average(), "mIoU":mean_IoU, "IoU_array":IoU_array})
     writer = writer_dict['writer']
     global_steps = writer_dict['valid_global_steps']
     writer.add_scalar('valid_loss', ave_loss.average(), global_steps)

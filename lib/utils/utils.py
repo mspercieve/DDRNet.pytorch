@@ -26,10 +26,11 @@ class FullModel(nn.Module):
   You can check the following discussion.
   https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/21
   """
-  def __init__(self, model, loss):
+  def __init__(self, model, sem_loss, bd_loss):
     super(FullModel, self).__init__()
     self.model = model
-    self.loss = loss
+    self.sem_loss = sem_loss
+    self.bd_loss = bd_loss
 
   def pixel_acc(self, pred, label):
     if pred.shape[2] != label.shape[1] and pred.shape[3] != label.shape[2]:
@@ -41,11 +42,13 @@ class FullModel(nn.Module):
     acc = acc_sum.float() / (pixel_sum.float() + 1e-10)
     return acc
 
-  def forward(self, inputs, labels, *args, **kwargs):
+  def forward(self, inputs, labels, bd_gt, *args, **kwargs):
     outputs = self.model(inputs, *args, **kwargs)
-    loss = self.loss(outputs, labels)
-    acc  = self.pixel_acc(outputs[1], labels)
-    return torch.unsqueeze(loss,0), outputs, acc
+    loss_s = self.sem_loss(outputs[:-1], labels)
+    loss_b = self.bd_loss(outputs[-1], bd_gt)
+    acc  = self.pixel_acc(outputs[-2], labels)
+    loss = loss_s + loss_b
+    return torch.unsqueeze(loss,0), outputs[:-1], acc, [loss_s, loss_b]
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
