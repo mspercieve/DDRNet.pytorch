@@ -15,4 +15,8 @@ import models.ddrnet_23_slim
 import models.ddrnet_23
 import models.ddrnet_39
 import models.fsm_v1
-import models.ddrnet_23_boundary_v1
+import models.my_model.ddrnet23_bd
+import models.my_model.ddrnet23_bd_bag
+import models.my_model.ddrnet23_wo_bd
+import models.my_model.ddrnet23_bd_pag
+import models.my_model.ddrnet23_wo_bd_pag

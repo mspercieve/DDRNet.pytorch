@@ -101,6 +101,7 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
                       batch_time.average(), [x['lr'] for x in optimizer.param_groups], ave_loss.average(),
                       ave_acc.average())
             logging.info(msg)
+        if i_iter == epoch_iters:
             wandb.log({"Epoch": epoch, "Loss": ave_loss.average(), "Acc":ave_acc.average(), "BCE_loss": avg_bce_loss.average()})
 
     writer.add_scalar('train_loss', ave_loss.average(), global_steps)
