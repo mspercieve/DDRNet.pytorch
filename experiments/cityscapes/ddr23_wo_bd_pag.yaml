@@ -15,7 +15,7 @@ DATASET:
   TRAIN_SET: 'list/cityscapes/train.lst'
   NUM_CLASSES: 19
 MODEL:
-  NAME: ddrnet_23_boundary_v1
+  NAME: ddrnet23_wo_bd_pag
   NUM_OUTPUTS: 2
   PRETRAINED: "pretrained_models/DDRNet23s_imagenet.pth"
   ALIGN_CORNERS: false
