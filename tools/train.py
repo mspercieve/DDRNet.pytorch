@@ -25,6 +25,7 @@ from tensorboardX import SummaryWriter
 
 import _init_paths
 import models
+import models.my_model
 import datasets
 from config import config
 from config import update_config
@@ -32,6 +33,7 @@ from core.criterion import CrossEntropy, OhemCrossEntropy, BoundaryLoss
 from core.function import train, validate
 from utils.modelsummary import get_model_summary
 from utils.utils import create_logger, FullModel
+import wandb
 
 [sys.path.append(i) for i in ['.','..']]
 
@@ -63,7 +65,8 @@ def get_sampler(dataset):
 
 def main():
     args = parse_args()
-
+    wandb.init(project = 's15-ddrnet23')
+    wandb.run.name = 'ddrnet23_without_bd_with_pag'
     if args.seed > 0:
         import random
         print('Seeding with', args.seed)
@@ -98,9 +101,9 @@ def main():
 
     # build model
     if torch.__version__.startswith('1'):
-        module = eval('models.'+config.MODEL.NAME)
+        module = eval('models.my_model.'+config.MODEL.NAME)
         module.BatchNorm2d_class = module.BatchNorm2d = torch.nn.BatchNorm2d
-    model = eval('models.'+config.MODEL.NAME +
+    model = eval('models.my_model.'+config.MODEL.NAME +
                  '.get_seg_model')(config)
 
     # dump_input = torch.rand( (1, 3, config.TRAIN.IMAGE_SIZE[1], config.TRAIN.IMAGE_SIZE[0]) )
@@ -289,7 +292,7 @@ def main():
                   epoch_iters, config.TRAIN.LR, num_iters,
                   trainloader, optimizer, model, writer_dict)
 
-        if epoch % 10 == 0:
+        if epoch % 10 == 0 or epoch > (end_epoch - 100):
             valid_loss, mean_IoU, IoU_array = validate(config, 
                         testloader, model, writer_dict)
 
