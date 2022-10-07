@@ -202,6 +202,52 @@ class segmenthead(nn.Module):
 
         return out
 
+class PagFM(nn.Module):
+    def __init__(self, in_channels, mid_channels, after_relu=False, with_channel=False, BatchNorm=nn.BatchNorm2d):
+        super(PagFM, self).__init__()
+        self.with_channel = with_channel
+        self.after_relu = after_relu
+        self.f_x = nn.Sequential(
+                                nn.Conv2d(in_channels, mid_channels, 
+                                          kernel_size=1, bias=False),
+                                BatchNorm(mid_channels)
+                                )
+        self.f_y = nn.Sequential(
+                                nn.Conv2d(in_channels, mid_channels, 
+                                          kernel_size=1, bias=False),
+                                BatchNorm(mid_channels)
+                                )
+        if with_channel:
+            self.up = nn.Sequential(
+                                    nn.Conv2d(mid_channels, in_channels, 
+                                              kernel_size=1, bias=False),
+                                    BatchNorm(in_channels)
+                                   )
+        if after_relu:
+            self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, x, y):
+        input_size = x.size()
+        if self.after_relu:
+            y = self.relu(y)
+            x = self.relu(x)
+        
+        y_q = self.f_y(y)
+        y_q = F.interpolate(y_q, size=[input_size[2], input_size[3]],
+                            mode='bilinear', align_corners=False)
+        x_k = self.f_x(x)
+        
+        if self.with_channel:
+            sim_map = torch.sigmoid(self.up(x_k * y_q))
+        else:
+            sim_map = torch.sigmoid(torch.sum(x_k * y_q, dim=1).unsqueeze(1))
+        
+        y = F.interpolate(y, size=[input_size[2], input_size[3]],
+                            mode='bilinear', align_corners=False)
+        x = (1-sim_map)*x + sim_map*y
+        
+        return x
+
 class Bag(nn.Module):
     def __init__(self, in_channels, out_channels, BatchNorm=nn.BatchNorm2d):
         super(Bag, self).__init__()
@@ -240,6 +286,9 @@ class DualResNet(nn.Module):
         self.layer2 = self._make_layer(block, planes, planes * 2, layers[1], stride=2)
         self.layer3 = self._make_layer(block, planes * 2, planes * 4, layers[2], stride=2)
         self.layer4 = self._make_layer(block, planes * 4, planes * 8, layers[3], stride=2)
+
+        self.pag3 = PagFM(planes * 2, planes)
+        self.pag4 = PagFM(planes * 2, planes)
 
         self.compression3 = nn.Sequential(
                                           nn.Conv2d(planes * 4, highres_planes, kernel_size=1, bias=False),
@@ -291,7 +340,7 @@ class DualResNet(nn.Module):
 
         if self.augment:
             self.seghead_detail = segmenthead(highres_planes, head_planes, num_classes)            
-            self.seghead_boundary = segmenthead(planes * 2, planes, 1, scale_factor=8)
+            self.seghead_boundary = segmenthead(planes* 2, planes, 1, scale_factor=8)
         self.final_layer = segmenthead(planes * 4, head_planes, num_classes)
 
 
@@ -357,11 +406,8 @@ class DualResNet(nn.Module):
         x_b = self.layer3_b(self.relu(layers[1])) # shape = [batch, planes, 1/8, 1/8] (boundary3)
 
 
-        #x = x + self.down3(self.relu(x_))  #shape = [batch, planes * 4, 1/16, 1/16] (context3= context3 + detail3')
-        x_ = x_ + F.interpolate(
-                        self.compression3(self.relu(layers[2])),
-                        size=[height_output, width_output],
-                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail3 = detail3 + context3')
+        
+        x_ = self.pag3(x_, self.compression3(x)) # shape = [batch, planes * 2, 1/8, 1/8] (detail3 = detail3 + context3')
 
         x_b = x_b + F.interpolate(
                         self.diff3(x),
@@ -371,36 +417,33 @@ class DualResNet(nn.Module):
 
         if self.augment:
             temp_detail = x_# detail head
-            
 
         x = self.layer4(self.relu(x)) #shape = [batch, planes * 8, 1/32, 1/32] (context4)
         layers.append(x)
         x_ = self.layer4_(self.relu(x_)) #shape = [batch, planes * 2, 1/8, 1/8] (detail4)
         x_b = self.layer4_b(self.relu(x_b)) #shape = [batch, planes * 2, 1/8, 1/8] (boundary4)
 
-
-        #x = x + self.down4(self.relu(x_)) # shape = [batch, planes * 8, 1/32, 1/32] (context4 = context4 + detail4')
-        x_ = x_ + F.interpolate(
-                        self.compression4(self.relu(layers[3])),
-                        size=[height_output, width_output],
-                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail4 = detail4 + context4')
+        x_ = self.pag4(x_, self.compression4(x)) # shape = [batch, planes * 2, 1/8, 1/8] (detail4 = detail4 + context4')
         x_b = x_b + F.interpolate(
                         self.diff4(x),
                         size = [height_output, width_output],
                         mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (boundary4 = boundary4 + context4')
-        
-        #boundary layers
-        if self.augment:
+        if self.augment:    
             temp_boundary = x_b # boundary head
-
+        
+        
         x_ = self.layer5_(self.relu(x_)) #shape = [batch, planes * 4, 1/8, 1/8] (detail5)
         x_b = self.layer5_b(self.relu(x_b)) #shape = [batch, planes * 4, 1/8, 1/8] (boundary5)
+        
+        
+
+
         x = F.interpolate(
                         self.spp(self.layer5(self.relu(x))),
                         size=[height_output, width_output],
-                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] ( DAPPM + interpolation)
+                        mode='bilinear') # shape = [batch, planes * 4, 1/8, 1/8] ( DAPPM + interpolation)
 
-        x_ = self.final_layer(self.dfm(x_, x, x_b)) #shape = [batch, num_classes, 1/8, 1/8] (output)
+        x_ = self.final_layer(self.dfm(x_,x,x_b)) #shape = [batch, num_classes, 1/8, 1/8] (output)
 
         if self.augment: 
             x_detail_head = self.seghead_detail(temp_detail)

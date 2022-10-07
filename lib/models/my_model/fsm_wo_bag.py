@@ -1,3 +1,4 @@
+from re import I
 from ctypes import util
 import math
 from turtle import mode
@@ -202,6 +203,52 @@ class segmenthead(nn.Module):
 
         return out
 
+class FSM(nn.Module):
+    def __init__(self, stage, d_ch, c_ch, dim):
+        super(FSM, self).__init__()
+        self.relu = nn.ReLU(inplace=True)
+        self.conv_d = nn.Sequential(
+                                    nn.Conv2d(d_ch, dim, kernel_size=1, bias=False),
+                                    nn.BatchNorm2d(dim),
+                                    nn.ReLU(inplace=True)
+                                    )   
+        self.conv_c = nn.Sequential(
+                                    nn.Conv2d(c_ch, dim, kernel_size=1, bias=False),
+                                    nn.BatchNorm2d(dim),
+                                    nn.ReLU(inplace=True)
+                                    )
+        self.conv_fuse = nn.Conv2d(dim * 2, dim * 2, kernel_size=1, bias=False)
+        self.conv_fuse_c = nn.Sequential(
+                                    nn.Conv2d(dim, d_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                                    nn.BatchNorm2d(d_ch)
+                                    )
+        if stage==3:
+            self.conv_fuse_d = nn.Sequential(
+                                    nn.Conv2d(dim, c_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                                    nn.BatchNorm2d(c_ch)
+                                    )
+        else :
+            self.conv_fuse_d = nn.Sequential(
+                                    nn.Conv2d(dim, d_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                                    nn.BatchNorm2d(d_ch),
+                                    nn.ReLU(inplace=True),
+                                    nn.Conv2d(d_ch, c_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                                    nn.BatchNorm2d(c_ch)
+                                    )
+    def forward(self, c, d):
+        N,C,H,W = d.size()
+        c_resize = F.interpolate(self.conv_c(c), size = [H,W], mode='bilinear', align_corners = False)
+        d_resize = self.conv_d(d)
+        fuse_score = torch.sigmoid(self.conv_fuse(torch.cat([c_resize, d_resize],dim=1)))
+        fuse_score_c, fuse_score_d = torch.chunk(fuse_score, 2, dim=1)
+        c_resize = c_resize * fuse_score_c
+        d_resize = d_resize * fuse_score_d
+
+        d_ff = self.conv_fuse_c(c_resize)
+        c_ff = self.conv_fuse_d(d_resize)
+
+        return c_ff, d_ff
+
 class Bag(nn.Module):
     def __init__(self, in_channels, out_channels, BatchNorm=nn.BatchNorm2d):
         super(Bag, self).__init__()
@@ -240,6 +287,10 @@ class DualResNet(nn.Module):
         self.layer2 = self._make_layer(block, planes, planes * 2, layers[1], stride=2)
         self.layer3 = self._make_layer(block, planes * 2, planes * 4, layers[2], stride=2)
         self.layer4 = self._make_layer(block, planes * 4, planes * 8, layers[3], stride=2)
+
+
+        self.fsm3 = FSM(3, planes * 2, planes * 4, planes)
+        self.fsm4 = FSM(4, planes * 2, planes * 8, planes * 2)
 
         self.compression3 = nn.Sequential(
                                           nn.Conv2d(planes * 4, highres_planes, kernel_size=1, bias=False),
@@ -291,7 +342,7 @@ class DualResNet(nn.Module):
 
         if self.augment:
             self.seghead_detail = segmenthead(highres_planes, head_planes, num_classes)            
-            self.seghead_boundary = segmenthead(planes * 2, planes, 1, scale_factor=8)
+            self.seghead_boundary = segmenthead(planes* 2, planes, 1, scale_factor=8)
         self.final_layer = segmenthead(planes * 4, head_planes, num_classes)
 
 
@@ -356,51 +407,51 @@ class DualResNet(nn.Module):
         x_ = self.layer3_(self.relu(layers[1])) # shape = [batch, planes * 2, 1/8, 1/8] (detail3)
         x_b = self.layer3_b(self.relu(layers[1])) # shape = [batch, planes, 1/8, 1/8] (boundary3)
 
-
-        #x = x + self.down3(self.relu(x_))  #shape = [batch, planes * 4, 1/16, 1/16] (context3= context3 + detail3')
-        x_ = x_ + F.interpolate(
-                        self.compression3(self.relu(layers[2])),
-                        size=[height_output, width_output],
-                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail3 = detail3 + context3')
-
         x_b = x_b + F.interpolate(
-                        self.diff3(x),
+                        self.diff3(self.relu(x)),
                         size = [height_output, width_output],
                         mode='bilinear') # shape = [batch, planes, 1/8, 1/8] (boundary3 = boundary3 + context3')
+        
+        c_ff3, d_ff3 = self.fsm3(self.relu(x), self.relu(x_)) # shape = [batch, planes * 2, 1/8, 1/8] (detail3 = detail3 + context3')
+        x = x + c_ff3
+        x_ = x_ + d_ff3
+        
 
 
         if self.augment:
             temp_detail = x_# detail head
-            
 
         x = self.layer4(self.relu(x)) #shape = [batch, planes * 8, 1/32, 1/32] (context4)
         layers.append(x)
         x_ = self.layer4_(self.relu(x_)) #shape = [batch, planes * 2, 1/8, 1/8] (detail4)
         x_b = self.layer4_b(self.relu(x_b)) #shape = [batch, planes * 2, 1/8, 1/8] (boundary4)
 
-
-        #x = x + self.down4(self.relu(x_)) # shape = [batch, planes * 8, 1/32, 1/32] (context4 = context4 + detail4')
-        x_ = x_ + F.interpolate(
-                        self.compression4(self.relu(layers[3])),
-                        size=[height_output, width_output],
-                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail4 = detail4 + context4')
         x_b = x_b + F.interpolate(
-                        self.diff4(x),
+                        self.diff4(self.relu(x)),
                         size = [height_output, width_output],
                         mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (boundary4 = boundary4 + context4')
-        
-        #boundary layers
-        if self.augment:
-            temp_boundary = x_b # boundary head
 
+        c_ff4, d_ff4 = self.fsm4(x, x_) # shape = [batch, planes * 2, 1/8, 1/8] (detail4 = detail4 + context4')
+        x = x+ c_ff4
+        x_ = x_ + d_ff4
+
+        
+        if self.augment:    
+            temp_boundary = x_b # boundary head
+        
+        
         x_ = self.layer5_(self.relu(x_)) #shape = [batch, planes * 4, 1/8, 1/8] (detail5)
         x_b = self.layer5_b(self.relu(x_b)) #shape = [batch, planes * 4, 1/8, 1/8] (boundary5)
+        
+        
+
+
         x = F.interpolate(
                         self.spp(self.layer5(self.relu(x))),
                         size=[height_output, width_output],
-                        mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] ( DAPPM + interpolation)
+                        mode='bilinear') # shape = [batch, planes * 4, 1/8, 1/8] ( DAPPM + interpolation)
 
-        x_ = self.final_layer(self.dfm(x_, x, x_b)) #shape = [batch, num_classes, 1/8, 1/8] (output)
+        x_ = self.final_layer(x + x_) #shape = [batch, num_classes, 1/8, 1/8] (output)
 
         if self.augment: 
             x_detail_head = self.seghead_detail(temp_detail)

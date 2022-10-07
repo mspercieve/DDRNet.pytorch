@@ -218,6 +218,98 @@ class Bag(nn.Module):
         edge_att = torch.sigmoid(d)
         return self.conv(edge_att*p + (1-edge_att)*i)
 
+class FSM(nn.Module):
+    def __init__(self, stage, d_ch, c_ch, dim):
+        super(FSM, self).__init__()
+        self.relu = nn.ReLU(inplace=True)
+        self.conv_d = nn.Sequential(
+                                    nn.Conv2d(d_ch, dim, kernel_size=1, bias=False),
+                                    nn.BatchNorm2d(dim),
+                                    nn.ReLU(inplace=True)
+                                    )   
+        self.conv_c = nn.Sequential(
+                                    nn.Conv2d(c_ch, dim, kernel_size=1, bias=False),
+                                    nn.BatchNorm2d(dim),
+                                    nn.ReLU(inplace=True)
+                                    )
+        self.conv_fuse = nn.Conv2d(dim, dim * 2, kernel_size=1, bias=False)
+        self.conv_fuse_d = nn.Sequential(
+                                    nn.Conv2d(dim, d_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                                    nn.BatchNorm2d(d_ch)
+                                    )
+        if stage==3:
+            self.conv_fuse_c = nn.Sequential(
+                                    nn.Conv2d(dim, c_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                                    nn.BatchNorm2d(c_ch)
+                                    )
+        else :
+            self.conv_fuse_c = nn.Sequential(
+                                    nn.Conv2d(dim, d_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                                    nn.BatchNorm2d(d_ch),
+                                    nn.ReLU(inplace=True),
+                                    nn.Conv2d(d_ch, c_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                                    nn.BatchNorm2d(c_ch)
+                                    )
+    def forward(self, c, d):
+        N,C,H,W = d.size()
+        c_resize = F.interpolate(self.conv_c(c), size = [H,W], mode='bilinear', align_corners = False)
+        d_resize = self.conv_d(d)
+        fuse_score = torch.sigmoid(self.conv_fuse(c_resize + d_resize))
+        fuse_score_c, fuse_score_d = torch.chunk(fuse_score, 2, dim=1)
+        c_resize = c_resize * fuse_score_c
+        d_resize = d_resize * fuse_score_d
+
+        c_ff = self.conv_fuse_c(c_resize)
+        d_ff = self.conv_fuse_d(d_resize)
+
+        return c_ff, d_ff
+
+class PagFM(nn.Module):
+    def __init__(self, in_channels, mid_channels, after_relu=False, with_channel=False, BatchNorm=nn.BatchNorm2d):
+        super(PagFM, self).__init__()
+        self.with_channel = with_channel
+        self.after_relu = after_relu
+        self.f_x = nn.Sequential(
+                                nn.Conv2d(in_channels, mid_channels, 
+                                          kernel_size=1, bias=False),
+                                BatchNorm(mid_channels)
+                                )
+        self.f_y = nn.Sequential(
+                                nn.Conv2d(in_channels, mid_channels, 
+                                          kernel_size=1, bias=False),
+                                BatchNorm(mid_channels)
+                                )
+        if with_channel:
+            self.up = nn.Sequential(
+                                    nn.Conv2d(mid_channels, in_channels, 
+                                              kernel_size=1, bias=False),
+                                    BatchNorm(in_channels)
+                                   )
+        if after_relu:
+            self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, x, y):
+        input_size = x.size()
+        if self.after_relu:
+            y = self.relu(y)
+            x = self.relu(x)
+        
+        y_q = self.f_y(y)
+        y_q = F.interpolate(y_q, size=[input_size[2], input_size[3]],
+                            mode='bilinear', align_corners=False)
+        x_k = self.f_x(x)
+        
+        if self.with_channel:
+            sim_map = torch.sigmoid(self.up(x_k * y_q))
+        else:
+            sim_map = torch.sigmoid(torch.sum(x_k * y_q, dim=1).unsqueeze(1))
+        
+        y = F.interpolate(y, size=[input_size[2], input_size[3]],
+                            mode='bilinear', align_corners=False)
+        x = (1-sim_map)*x + sim_map*y
+        
+        return x
+
 class DualResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=19, planes=64, spp_planes=128, head_planes=128, augment=True):
@@ -240,6 +332,12 @@ class DualResNet(nn.Module):
         self.layer2 = self._make_layer(block, planes, planes * 2, layers[1], stride=2)
         self.layer3 = self._make_layer(block, planes * 2, planes * 4, layers[2], stride=2)
         self.layer4 = self._make_layer(block, planes * 4, planes * 8, layers[3], stride=2)
+
+        self.pag3 = PagFM(planes * 2, planes, after_relu = True)
+        self.pag4 = PagFM(planes * 2, planes, after_relu = True)
+
+        self.fsm3 = FSM(3, planes*2, planes*4, planes)
+        self.fsm4 = FSM(4,planes*2, planes*8, planes)
 
         self.compression3 = nn.Sequential(
                                           nn.Conv2d(planes * 4, highres_planes, kernel_size=1, bias=False),
@@ -357,11 +455,15 @@ class DualResNet(nn.Module):
         x_b = self.layer3_b(self.relu(layers[1])) # shape = [batch, planes, 1/8, 1/8] (boundary3)
 
 
-        #x = x + self.down3(self.relu(x_))  #shape = [batch, planes * 4, 1/16, 1/16] (context3= context3 + detail3')
+        x = x + self.down3(self.relu(x_))  #shape = [batch, planes * 4, 1/16, 1/16] (context3= context3 + detail3')
         x_ = x_ + F.interpolate(
                         self.compression3(self.relu(layers[2])),
                         size=[height_output, width_output],
                         mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail3 = detail3 + context3')
+        #x_ = self.pag3(x_, self.compression3(layers[2]))
+        #c_ff3, d_ff3 = self.fsm3(self.relu(layers[2]),self.relu(x_))
+        #x = x + c_ff3
+        #x_ = x_ + d_ff3
 
         x_b = x_b + F.interpolate(
                         self.diff3(x),
@@ -378,12 +480,17 @@ class DualResNet(nn.Module):
         x_ = self.layer4_(self.relu(x_)) #shape = [batch, planes * 2, 1/8, 1/8] (detail4)
         x_b = self.layer4_b(self.relu(x_b)) #shape = [batch, planes * 2, 1/8, 1/8] (boundary4)
 
-
-        #x = x + self.down4(self.relu(x_)) # shape = [batch, planes * 8, 1/32, 1/32] (context4 = context4 + detail4')
+        
+        x = x + self.down4(self.relu(x_)) # shape = [batch, planes * 8, 1/32, 1/32] (context4 = context4 + detail4')
         x_ = x_ + F.interpolate(
                         self.compression4(self.relu(layers[3])),
                         size=[height_output, width_output],
                         mode='bilinear') # shape = [batch, planes * 2, 1/8, 1/8] (detail4 = detail4 + context4')
+        #x_ = self.pag4(x_, self.compression4(layers[3]))
+        #c_ff4, d_ff4 = self.fsm4(self.relu(layers[3]),self.relu(x_))
+        #x = x + c_ff4
+        #x_ = x_ + d_ff4
+        
         x_b = x_b + F.interpolate(
                         self.diff4(x),
                         size = [height_output, width_output],
